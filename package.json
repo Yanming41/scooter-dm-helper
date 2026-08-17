@@ -1,0 +1,13 @@
+{
+  "name": "scooter-dm-helper",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "独立iLink协议客户端(不依赖openclaw核心)，纯传输层：微信收发消息 <-> inbox.jsonl/outbox.jsonl 文件收发箱，起草/agent逻辑由外部脚本对接",
+  "main": "wechat_bridge.mjs",
+  "scripts": {
+    "start": "node wechat_bridge.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
+}

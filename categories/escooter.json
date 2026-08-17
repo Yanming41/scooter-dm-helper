@@ -1,0 +1,16 @@
+{
+  "id": "escooter",
+  "displayName": "电动滑板车",
+  "aliasesForPrompt": "electric scooter/kick scooter",
+  "searchKeywords": ["escooter", "电动滑板车"],
+  "genericBrandWords": [
+    "segway", "ninebot", "electric", "scooter", "kickscooter", "kick", "e-scooter",
+    "the", "for", "adult", "adults", "2025", "2026"
+  ],
+  "accessoryKeywords": [
+    "bag", "seat", "saddle", "charger", "case", "cover", "part", "replacement",
+    "tire", "tyre", "wheel", "handlebar", "strap", "lock", "mirror", "grip",
+    "sticker", "decal", "storage", "pouch", "organizer", "cable", "adapter"
+  ],
+  "minPlausiblePrice": 50
+}
