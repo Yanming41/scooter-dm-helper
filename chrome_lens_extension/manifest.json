@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Lens Query Bridge (本地专用)",
+  "version": "1.0",
+  "description": "轮询本地桥接服务器，用chrome.debugger临时附加到一个新标签页去查Google Lens，把结果传回去。只跟127.0.0.1通信，不上传任何数据到别处。",
+  "permissions": ["debugger", "tabs", "alarms"],
+  "host_permissions": ["http://127.0.0.1/*", "https://lens.google.com/*"],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

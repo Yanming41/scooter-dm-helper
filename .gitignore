@@ -27,3 +27,4 @@ report_*.md
 listings_*.json
 *.pem
 *.key
+*.log

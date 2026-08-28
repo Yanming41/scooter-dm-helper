@@ -10,7 +10,10 @@
 //      商品图)，并按信息量排优先级。取代了"就按原始顺序试前3张"这种盲选——之前吃过亏：多物
 //      混卖的帖子(比如滑板车+闲置IKEA家具一起卖)，正好试到了别的商品图上。
 //   1. SerpApi Google Lens —— 真·以图搜图(视觉相似度匹配，跟你手动上传图片到Google搜索
-//      是同一个后端 lens.google.com/uploadbyurl)，负责"这张图长得像什么"，准确度最高
+//      是同一个后端 lens.google.com/uploadbyurl)，负责"这张图长得像什么"，准确度最高。
+//      SerpApi免费额度用完(250次/月很容易撞满)会自动降级到浏览器扩展查询这条免费路径
+//      (见 getCandidates 函数 + docs/lens_extension_bridge_api.md)，两条路径最终都统一成
+//      同一种candidates格式，后面Gemini验证那步不用关心走的是哪条。
 //   2. Gemini(仅视觉+推理，不用google_search grounding) —— 负责两件事：
 //      a. 读图片上的可见文字(包装/铭牌/网页截图里的标题价格参数)
 //      b. 从Lens给的候选匹配列表里，结合图片本身和读到的文字，挑出真正对应"这件商品"的条目，
@@ -33,8 +36,12 @@
 
 import { readFile as fsReadFile, writeFile as fsWriteFile, mkdir as fsMkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
+import { startBridge } from "./lens_extension_bridge.mjs";
+import { lensSearchViaExtension } from "./lens_extension_search.mjs";
 
 const __dirname_top = path.dirname(fileURLToPath(import.meta.url));
 const IMAGES_ROOT = path.join(__dirname_top, "images");
@@ -212,6 +219,35 @@ function prefilterMatches(matches) {
     price: m.price?.value ?? null, // 没有就是null，不强求
     link: m.link,
   }));
+}
+
+// 免费额度用完时(SerpApi 250次/月很容易撞满)自动降级到浏览器扩展查询(见
+// chrome_lens_extension/ + lens_extension_bridge.mjs + lens_extension_search.mjs)——
+// 免费、无限量，代价是要求你的真实Chrome开着、装了那个扩展，慢一些(要真的开个标签页)。
+// 两条路径统一转换成同一种candidates格式，后面Gemini验证那步不用关心走的是哪条路。
+let bridgeStarted = false;
+async function getCandidates(url, serpApiKey, hint, buf, localImagePath) {
+  if (serpApiKey) {
+    try {
+      const matches = await lensSearch(url, serpApiKey, hint);
+      return prefilterMatches(matches);
+    } catch (e) {
+      console.error(`[Lens] SerpApi失败(${e.message})，降级到浏览器扩展...`);
+    }
+  }
+
+  if (!bridgeStarted) {
+    await startBridge();
+    bridgeStarted = true;
+  }
+  // 扩展要的是本地文件路径，不是URL——优先用已经归档好的本地缓存路径；
+  // 没有的话(比如CLI单独测试、没传noteId)就把已经下载好的buf临时写一份到系统temp目录。
+  let imagePath = localImagePath;
+  if (!imagePath) {
+    imagePath = path.join(tmpdir(), `lens_${randomUUID()}.jpg`);
+    await fsWriteFile(imagePath, buf);
+  }
+  return lensSearchViaExtension(imagePath);
 }
 
 // ---------- 第二步：Gemini 读图片文字 + 从候选列表里挑出真正匹配目标商品的条目 ----------
@@ -457,8 +493,10 @@ export async function identifyModel(imageUrls, opts = {}) {
   } = opts;
 
   if (!category) throw new Error("没有传 category——见 load_category.mjs，不猜默认品类");
-  if (!serpApiKey) throw new Error("没有 SerpApi key");
   if (!geminiApiKey) throw new Error("没有 Gemini key");
+  // SerpApi key没有也行——没有就直接走浏览器扩展那条路(见下面lensSearchWithFallback)，
+  // 有key的话优先用SerpApi(更快，不用真的开浏览器)，SerpApi失败(比如配额用完)了再自动降级。
+  if (!serpApiKey) console.error("[Lens] 没有配置SerpApi key，直接走浏览器扩展查询");
 
   // url -> 原始序号，用来拼本地归档的cacheKey("<noteId>/<序号>")，
   // selectRelevantImages 排完序之后 url 顺序会变，但序号要对应原始image_list里的位置不能变。
@@ -487,15 +525,16 @@ export async function identifyModel(imageUrls, opts = {}) {
       continue;
     }
 
-    let lensMatches;
+    const candidateLocalPath = cacheKeyFor(url) ? path.join(IMAGES_ROOT, `${cacheKeyFor(url)}.jpg`) : undefined;
+    const localImagePath = candidateLocalPath && existsSync(candidateLocalPath) ? candidateLocalPath : undefined;
+    let candidates;
     try {
-      lensMatches = await lensSearch(url, serpApiKey, hint);
+      candidates = await getCandidates(url, serpApiKey, hint, buf, localImagePath);
     } catch (e) {
-      attempts.push({ url, error: `Lens搜索失败: ${e.message}` });
+      attempts.push({ url, error: `Lens搜索失败(SerpApi+浏览器扩展都不行): ${e.message}` });
       continue;
     }
 
-    const candidates = prefilterMatches(lensMatches);
     if (candidates.length === 0) {
       attempts.push({ url, note: "Lens没找到任何候选(视觉匹配为空)" });
       continue;
