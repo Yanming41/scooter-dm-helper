@@ -1,0 +1,10 @@
+{
+  "id": "furniture_watch",
+  "displayName": "安省二手家具/地毯/宜家小推车监控",
+  "aliasesForPrompt": "rug/carpet, IKEA-brand furniture, IKEA RÅSKOG-style 3-tier rolling utility cart",
+  "searchKeywords": ["二手家具", "回国出闲置", "搬家出闲置", "宜家二手", "ikea二手"],
+  "genericBrandWords": [],
+  "accessoryKeywords": [],
+  "minPlausiblePrice": 0,
+  "note": "广撒网品类——卖家很少专门标'地毯'/'IKEA'这种精确标签，大多用'二手家具'/'回国出闲置'这类泛类标签打包卖多件东西(2026-09-18实测验证：40条样本里14条提到宜家)。价格不在这里做硬过滤，交给furniture_watch.mjs里的Gemini判断；地区(安省)过滤也在furniture_watch.mjs里做，不在关键词里做。"
+}

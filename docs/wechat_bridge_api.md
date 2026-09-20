@@ -2,6 +2,9 @@
 
 脚本：`~/IdeaProjects/scooter-dm-helper/wechat_bridge.mjs`
 
+**代号**：`wx_dm`(英文/代码语境，WeChat Direct Message，跟`xhs_dm`系列命名对应)，
+中文叫"信鸽"(口语/文档里称呼用，没改实际文件名，就是个方便称呼的代号)。
+
 **这个脚本只做微信收发的传输，不含任何起草/agent逻辑。** 它是常驻进程，跟外部agent之间
 靠两个文件通信，agent不需要知道任何微信/iLink协议细节。
 
@@ -77,6 +80,23 @@ pending 记录；如果 `reply_to` 对应不上（比如id写错、或者对应�
 这个文件是脚本自己的内部记账，删掉会导致重新扫码登录（`bot_token`丢失）以及 `outbox.jsonl`
 从头重新处理一遍（`outbox_lines_processed`归零，可能导致重复发送已经发过的内容）——**正常情况
 不要手动改动这个文件**。
+
+## 验收记录(2026-09-17)
+
+写完之后放了一个月没跑过，这次正式验收，发现iLink接口这一个月里悄悄变了两处格式，修了两个bug：
+
+1. **二维码接口`get_bot_qrcode`**：`qrcode_img_content`字段以前直接是base64图片数据
+   (`data:image/xxx;base64,...`)，现在改成返回一个URL(`https://liteapp.weixin.qq.com/q/...`)，
+   得自己拿这段文本生成二维码图案(用了`qrcode`这个npm包)，不能再直接当base64解码——之前这么
+   干过，解出来的是30字节随机垃圾数据，图片打不开。`login()`函数现在会先判断
+   `qrcode_img_content`是不是以`data:image`开头，两种格式都兼容。
+2. **长轮询接口`getupdates`**：以前所有接口成功都会带`ret:0`，`getupdates`现在成功时
+   干脆不带`ret`字段了，`ilinkFetch`原来的判断逻辑(`json.ret !== 0`)把正常的"当前没有
+   新消息"响应误判成报错。改成`json.ret !== undefined && json.ret !== 0`，没有`ret`
+   字段不再当成出错。
+
+修完之后收发都实测验证通过：手机发消息能正确进`inbox.jsonl`，写`outbox.jsonl`的回复
+也真的发到了手机上。
 
 ## 已知限制
 

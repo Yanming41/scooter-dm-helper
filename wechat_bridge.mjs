@@ -25,6 +25,7 @@ import { exec } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import QRCode from "qrcode";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -57,7 +58,10 @@ async function ilinkFetch(pathAndQuery, { method = "GET", body, token } = {}) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const json = await res.json();
-  if (json.ret !== 0) {
+  // 2026-09接口变更：不是所有接口都还带ret字段了(比如getupdates现在成功时干脆不带这个字段)。
+  // 只有明确带了ret字段、且不等于0，才真的是报错——没有ret字段不代表出错，之前这里判断过严，
+  // 把getupdates正常的"当前没有新消息"响应({"msgs":[],...})也当成报错抛出来了。
+  if (json.ret !== undefined && json.ret !== 0) {
     throw new Error(`iLink接口报错 ${pathAndQuery}: ${JSON.stringify(json)}`);
   }
   return json;
@@ -97,8 +101,15 @@ async function login() {
     "/ilink/bot/get_bot_qrcode?bot_type=3"
   );
 
-  const base64Data = qrcode_img_content.replace(/^data:image\/\w+;base64,/, "");
-  await writeFile(QRCODE_FILE, Buffer.from(base64Data, "base64"));
+  // 接口返回格式2026-09变过：以前qrcode_img_content直接是base64图片数据(data:image/...;base64,xxx)，
+  // 现在改成了一个纯URL(https://liteapp.weixin.qq.com/q/...)，得自己把这段文本生成成二维码图案，
+  // 不能再直接当base64解码——之前这么干过，解出来的是30字节的随机垃圾数据，图片打不开。
+  if (qrcode_img_content.startsWith("data:image")) {
+    const base64Data = qrcode_img_content.replace(/^data:image\/\w+;base64,/, "");
+    await writeFile(QRCODE_FILE, Buffer.from(base64Data, "base64"));
+  } else {
+    await QRCode.toFile(QRCODE_FILE, qrcode_img_content, { width: 400 });
+  }
   console.log(`二维码已保存到: ${QRCODE_FILE}，正在尝试自动打开...`);
   openFile(QRCODE_FILE);
   console.log("用微信扫码授权（120秒内），扫完在手机上确认一下。");
