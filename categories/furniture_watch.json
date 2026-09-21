@@ -1,8 +1,8 @@
 {
   "id": "furniture_watch",
-  "displayName": "安省二手家具/地毯/宜家小推车监控",
-  "aliasesForPrompt": "rug/carpet, IKEA-brand furniture, IKEA RÅSKOG-style 3-tier rolling utility cart",
-  "searchKeywords": ["二手家具", "回国出闲置", "搬家出闲置", "宜家二手", "ikea二手"],
+  "displayName": "安省二手家具/地毯/宜家小推车/滑板车/人体工学椅监控",
+  "aliasesForPrompt": "rug/carpet, IKEA-brand furniture, IKEA RÅSKOG-style 3-tier rolling utility cart, electric scooter, ergonomic office chair",
+  "searchKeywords": ["二手家具", "回国出闲置", "搬家出闲置", "宜家二手", "ikea二手", "escooter", "电动滑板车", "人体工学椅"],
   "genericBrandWords": [],
   "accessoryKeywords": [],
   "minPlausiblePrice": 0,
