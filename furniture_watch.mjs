@@ -48,10 +48,33 @@ const DISCORD_INBOX_FILE = path.join(DISCORD_DM_DIR, "inbox.jsonl");
 const SENDER_NAME = "小红书爬虫";
 
 const CATEGORY_ID = "furniture_watch";
-const INTERVAL_MS = 20 * 60 * 1000; // 2026-09-20按用户要求从25分钟调成20分钟
-const CRAWLER_MAX_NOTES_PER_KEYWORD = 20;
 const MAX_IMAGES_PER_NOTE = 8; // 一次性传给Gemini的图片数封顶，太多张会拖慢+费token
 const INBOX_POLL_MS = 3000;
+
+// 2026-09-21：账号被检测出AI浏览之后，把"每次都一模一样"的几个地方都加上随机变化——
+// 不是为了主动绕过验证码/伪装指纹(那个明确不做，见对话记录)，纯粹是减少不必要的机械化
+// 规律性，这本来就是合理的工程实践，跟是否被检测无关也该这么做。
+
+// 间隔在18~24分钟之间随机，而不是死板的20分钟——之前连续7轮实测过，
+// 老代码每次间隔都精确到20.1x分钟，这种精度真人不可能做到，是很明显的机器特征。
+function nextIntervalMs() {
+  const minMs = 18 * 60 * 1000;
+  const maxMs = 24 * 60 * 1000;
+  return Math.floor(minMs + Math.random() * (maxMs - minMs));
+}
+
+// 每一轮搜的关键词数量也随机(4~8个)，而不是永远8个一起搜——具体搜哪几个也随机选，
+// 不是每次都同一个顺序。多轮下来所有关键词还是都会被覆盖到，只是不再"每次完全一样"。
+function pickKeywordsForThisCycle(allKeywords) {
+  const count = 4 + Math.floor(Math.random() * (allKeywords.length - 3)); // 4 ~ allKeywords.length
+  const shuffled = [...allKeywords].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, count);
+}
+
+// 每个关键词抓多少篇笔记也在一个范围内随机，不是每次都精确16
+function randomMaxNotesPerKeyword() {
+  return 12 + Math.floor(Math.random() * 9); // 12 ~ 20
+}
 
 // 安省相关地名——2026-09-18用真实抓取数据验证过，样本里安省相关帖子会用这些城市/简写。
 // "dt自取"是多伦多当地帖子常见简写(downtown)，先加进来，后续发现漏判/误判可以再调。
@@ -65,6 +88,53 @@ const MISSISSAUGA_PATTERN = /密西沙加|密西|Mississauga/i;
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 const GEMINI_MODEL = "gemini-flash-lite-latest";
 const GEMINI_TIMEOUT_MS = 60_000;
+
+// 2026-09-21：这个key是从 jevtypesafeai.com 买的，不是官方 api.typesafe.ai 的key(官方
+// 博客从没提过这个域名，大概率是第三方转售/代购服务)——细节见 .env 里TYPESAFE_API_KEY
+// 上面的注释。接口地址跟着换成这家的，格式是用户从这家网站拿到的示例反推的，没有官方文档
+// 能核对，如果以后调用一直失败，先怀疑是不是这家的接口格式变了或者服务本身不稳定。
+const TYPESAFE_URL = "https://jevtypesafeai.com/api/v1/decide";
+
+// ---------- 出错时用Jev(TypeSafe的System One模型)决定下一步，而不是每次都无脑提醒 ----------
+//
+// 2026-09-20新增：之前的做法是"只要这一轮出错就一定发Discord提醒"——太吵，而且很多失败
+// 其实是瞬时的(网络抖动之类)，用不着叫人。这里把错误信息喂给Jev，让它从几个选项里选一个：
+// 立刻重试一次 / 安静地等下一个正常周期 / 需要真人介入(推提醒) / 放弃这一轮不用管。
+// Jev本身调用失败(没配key、网络问题等)时直接退化成"总是提醒"这个旧行为，不会因为Jev
+// 挂了就把真正需要人工处理的问题(比如又要扫码登录)漏掉。
+async function decideNextAction(errorMessage, typesafeApiKey) {
+  const res = await fetch(TYPESAFE_URL, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${typesafeApiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      state: errorMessage,
+      model: "jev-latest",
+      questions: {
+        next_action: {
+          type: "choice",
+          instructions:
+            "小红书爬虫这一轮抓取/处理失败了，state里是具体的错误信息。结合错误内容判断接下来该怎么处理。",
+          criteria: {
+            retry_now: "错误看起来是偶发/瞬时的(比如网络超时、临时抖动)，值得立刻重试一次",
+            wait_and_retry:
+              "错误可能需要一段时间自己恢复(比如刚好赶上限流高峰)，这次先跳过，等下一个正常调度周期(20分钟后)再试就行，不用额外提醒用户",
+            call_human:
+              "错误看起来需要人工介入才能解决(比如要求重新扫码登录、出现验证码、账号被限制/风控)，应该提醒用户来处理",
+            abandon_cycle: "错误原因不明或者不值得深究，这次跳过就好，不用重试也不用提醒",
+          },
+        },
+      },
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`Jev调用失败: HTTP ${res.status}`);
+  const json = await res.json();
+  // jevtypesafeai.com这家的响应格式跟官方文档写的不太一样，结果包在answers这一层里，
+  // 不是直接在顶层——2026-09-21实测确认的，官方文档不适用于这家。
+  const answer = json.answers?.next_action;
+  if (!answer?.choice) throw new Error("Jev没有返回有效的choice");
+  return answer; // { choice, confidence, probabilities }
+}
 
 // ---------- Gemini 多模态分类：看文字+看图，判断命中哪些条目，每条目配一张展示图 ----------
 
@@ -234,7 +304,7 @@ function runMediaCrawlerLight(keywords) {
         "--get_comment",
         "false",
         "--crawler_max_notes_count",
-        String(CRAWLER_MAX_NOTES_PER_KEYWORD),
+        String(randomMaxNotesPerKeyword()),
       ],
       { cwd: MEDIACRAWLER_DIR, shell: true, stdio: "inherit" } // inherit：MediaCrawler自己的日志(包括登录提示)直接透传到furniture_watch.log里，用户能看到
     );
@@ -362,13 +432,15 @@ async function checkDiscordInbox() {
 // ---------- 一轮完整流程 ----------
 
 async function runCycle(category, geminiApiKey, seen, { skipCrawl = false } = {}) {
-  console.log(`[${new Date().toISOString()}] 开始新一轮抓取: ${category.searchKeywords.join(",")}`);
+  // 这一轮实际搜哪几个关键词是随机挑的子集，不是每次都全部8个——见pickKeywordsForThisCycle。
+  const keywordsThisCycle = pickKeywordsForThisCycle(category.searchKeywords);
+  console.log(`[${new Date().toISOString()}] 开始新一轮抓取: ${keywordsThisCycle.join(",")}`);
   if (skipCrawl) {
     // 调试用：跳过重新抓取，直接用现有的all_contents.jsonl——排查分类/推送逻辑时不用
     // 每次都真的去打小红书，节省时间也不会给账号增加不必要的抓取流量。
     console.log("[调试] --skip-crawl，跳过抓取，直接用现有all_contents.jsonl");
   } else {
-    await runMediaCrawlerLight(category.searchKeywords);
+    await runMediaCrawlerLight(keywordsThisCycle);
     await runConsolidate();
   }
 
@@ -425,17 +497,74 @@ async function runCycle(category, geminiApiKey, seen, { skipCrawl = false } = {}
   console.log(sentCount > 0 ? `本轮共发送 ${sentCount} 条` : "本轮没有命中的listing，不打扰用户");
 }
 
+// ---------- 一轮失败之后该怎么办：交给Jev判断，Jev本身不可用就退化成旧行为(总是提醒) ----------
+
+async function alertHuman(errorMessage, note = "") {
+  await pushToDiscord({
+    sender: SENDER_NAME,
+    text: `⚠️ 这一轮抓取/处理失败了，可能需要你去看看小红书是不是要求重新登录/过验证码：\n${errorMessage}${note}`,
+  }).catch(() => {});
+}
+
+async function handleCycleFailure(error, typesafeApiKey, category, geminiApiKey, seen, opts) {
+  if (!typesafeApiKey) {
+    await alertHuman(error.message);
+    return;
+  }
+
+  let decision;
+  try {
+    decision = await decideNextAction(error.message, typesafeApiKey);
+  } catch (jevErr) {
+    console.error("[Jev决策出错，退化成总是提醒]:", jevErr.message);
+    await alertHuman(error.message);
+    return;
+  }
+
+  console.log(`[Jev决策] ${decision.choice} (置信度${decision.confidence?.toFixed?.(2) ?? "?"})`);
+
+  switch (decision.choice) {
+    case "retry_now":
+      // 只重试这一次，不递归——重试还是失败的话，就落到下一个正常调度周期，
+      // 不能因为Jev一直选retry_now就没完没了地重试下去。
+      try {
+        await runCycle(category, geminiApiKey, seen, opts);
+        console.log("[Jev决策] 立刻重试成功");
+      } catch (retryErr) {
+        console.error("[Jev决策] 立刻重试还是失败:", retryErr.message);
+        await alertHuman(retryErr.message, "\n(Jev判断可以重试，但重试后依然失败)");
+      }
+      break;
+    case "call_human":
+      await alertHuman(error.message);
+      break;
+    case "wait_and_retry":
+    case "abandon_cycle":
+      // 安静跳过，不提醒——日志里已经有了，需要的话自己回头查
+      break;
+    default:
+      // 不认识的选项，保守起见还是提醒一下
+      await alertHuman(error.message, `\n(Jev返回了不认识的选项: ${decision.choice})`);
+  }
+}
+
 async function main() {
   const category = await loadCategory(CATEGORY_ID);
   const env = await loadEnv();
   const geminiApiKey = env.GEMINI_API_KEY;
   if (!geminiApiKey) throw new Error("没有 GEMINI_API_KEY，检查 .env");
+  const typesafeApiKey = env.TYPESAFE_API_KEY || null;
+  console.log(
+    typesafeApiKey
+      ? "[Jev] 已配置TYPESAFE_API_KEY，出错时会用Jev判断下一步"
+      : "[Jev] 没配置TYPESAFE_API_KEY，出错时退化成旧行为(每次都发Discord提醒)"
+  );
   if (!existsSync(DISCORD_DM_DIR)) {
     throw new Error(`找不到discord_dm目录: ${DISCORD_DM_DIR}，检查路径；另外记得discord_dm.mjs要单独常驻跑起来`);
   }
 
   const seen = await loadSeen();
-  console.log(`[furniture_watch] 启动，已有 ${seen.size} 条历史记录，每 ${INTERVAL_MS / 60000} 分钟跑一轮`);
+  console.log(`[furniture_watch] 启动，已有 ${seen.size} 条历史记录，每轮间隔18~24分钟随机`);
 
   // 启动时把discordInboxLinesProcessed对齐到文件当前末尾——不处理重启之前留下的旧点击事件
   // (interaction token反正十几分钟就过期了，处理了也回复不了)。
@@ -451,17 +580,13 @@ async function main() {
     try {
       await runCycle(category, geminiApiKey, seen, { skipCrawl });
     } catch (e) {
-      console.error("本轮出错，跳过等下一轮:", e.message);
-      // 抓取/分类失败大概率是需要人工介入的事(重新登录小红书、过验证码之类)，
-      // 主动推个提醒到Discord，不然用户不会一直盯着终端，容易几个小时都没人发现。
-      await pushToDiscord({
-        sender: SENDER_NAME,
-        text: `⚠️ 这一轮抓取/处理失败了，可能需要你去看看小红书是不是要求重新登录/过验证码：\n${e.message}`,
-      }).catch(() => {});
+      console.error("本轮出错:", e.message);
+      await handleCycleFailure(e, typesafeApiKey, category, geminiApiKey, seen, { skipCrawl });
     }
     if (runOnce) process.exit(0); // 常驻进程(setInterval)不会让Node自然退出，--once必须显式exit
-    console.log(`等待 ${INTERVAL_MS / 60000} 分钟进入下一轮...`);
-    await new Promise((r) => setTimeout(r, INTERVAL_MS));
+    const waitMs = nextIntervalMs();
+    console.log(`等待 ${(waitMs / 60000).toFixed(1)} 分钟进入下一轮...`);
+    await new Promise((r) => setTimeout(r, waitMs));
   }
 }
 
